@@ -3,6 +3,10 @@
 
   inputs = {
     nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/0"; # stable Nixpkgs
+    pyproject-nix = {
+      url = "github:nix-community/pyproject.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -19,22 +23,38 @@
         f:
         inputs.nixpkgs.lib.genAttrs supportedSystems (
           system:
-          f {
+          f rec {
             inherit system;
             pkgs = import inputs.nixpkgs {
               inherit system;
             };
+            python = pkgs.python3;
           }
         );
+      project = inputs.pyproject-nix.lib.project.loadPyproject {
+        projectRoot = ./.;
+      };
     in
     {
+      packages = forEachSupportedSystem (
+        { pkgs, system, python }: let 
+          attrs = project.renderers.buildPythonPackage { 
+            inherit python;
+          };
+        in {
+          default = pkgs.python3Packages.buildPythonPackage (attrs // { 
+            nativeBuildInputs = [ pkgs.python3Packages.pytestCheckHook ];
+          });
+        }
+      ); 
+
       devShells = forEachSupportedSystem (
-        { pkgs, system }: let 
+        { pkgs, system, python }: let 
+          arg = project.renderers.withPackages { inherit python; };
+          pythonEnv = python.withPackages arg;
         in {
           default = pkgs.mkShellNoCC {
-            packages = with pkgs; [
-              libfaketime
-            ];
+            packages = [ pythonEnv ];
           };
         }
       );
