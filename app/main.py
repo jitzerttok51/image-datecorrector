@@ -11,19 +11,7 @@ from .utils import getTimeData
 from typing import List
 import zipfile
 import subprocess
-
-def zipPaths(paths: List[Path]):
-    """
-    Zips a list of Path objects into a single archive.
-    """
-    with zipfile.ZipFile("archive.zip", 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for path in paths:
-            if path.exists():
-                # arcname determines the name of the file inside the zip
-                # path.name ensures it doesn't store the full absolute path
-                zipf.write(path, arcname=path.name)
-            else:
-                logger.warn(f"Warning: {path} does not exist, skipping.")
+import time
 
 def setupLogger():
     logging.basicConfig(
@@ -46,69 +34,88 @@ def copyFile(original: Path) -> Path:
     logger.debug(f"Wrote backup of {original} into {newPath}")
     return newPath
 
-def setModificationDate(path: Path, date):
-    timestamp = date.timestamp()
-    os.utime(str(path), (timestamp, timestamp))
-
-def getTimeData(path: Path):
-    """
-    Analyzes filename for YYYYMMDD_HHMMSS or Unix Epoch patterns.
-    Returns a single datetime object or None if no match found.
-    """
-    # Pattern 1: 20231025_123045
-    std_pattern = r"([0-9]{8})_([0-9]{6})"
-    # Pattern 2: mid_1410120397719 (extracting the 10-digit seconds part)
-    epoch_pattern = r"mid_([0-9]{10})"
-
-    # Check for Standard YYYYMMDD_HHMMSS
-    std_match = re.search(std_pattern, path.name)
-    if std_match:
-        dt_string = std_match.group(1) + std_match.group(2)
-        return datetime.strptime(dt_string, "%Y%m%d%H%M%S")
-
-    # Check for Epoch (received_m_mid_...)
-    epoch_match = re.search(epoch_pattern, path.name)
-    if epoch_match:
-        seconds = int(epoch_match.group(1))
-        return datetime.fromtimestamp(seconds)
-
-    return None
-
-def unzipWithCorrectDate(date: datetime, path: Path):
+def patchDate(date: datetime, path: Path):
     try:
         # Equivalent to: sudo date -s "2025-12-27 14:30:00"
-        subprocess.run(["sudo", "date", "-s", date.strftime('%Y-%m-%d %H:%M:%S')], check=True)
-        subprocess.run(["rm", "-rf", path.name], check=True)
-        subprocess.run(["unzip", "-j", "archive.zip", path.name], check=True)
-        os.chmod(str(path), 0o644)
+        data = path.read_bytes()
+        commands = f"""
+        rm -rf {path}
+        sudo date -s '{date.strftime('%Y-%m-%d %H:%M:%S')}' && touch {path}
+        """
+        subprocess.run(commands, check=True, shell=True)
+        path.write_bytes(data)
+        timestamp = date.timestamp()
+        os.utime(path, (timestamp, timestamp))
     except subprocess.CalledProcessError as e:
         logger.error(f"Failed to run sudo: {e}")
+        raise e
     finally:
         subprocess.run(["sudo", "hwclock", "-s"], check=True)
 
-@click.command()
-@click.argument('filename')
-def main(filename):
-    """
-    Metadata Revision Tool.
+def patchDateWithBackup(date: datetime, path: Path):
+    backup = path.parent / f"{path.name}.bak"
+    try:
+        shutil.copy2(path, backup)
+        patchDate(date, path)
+        backup.unlink()
+    except Exception as e:
+        shutil.copy2(backup, path)
+        backup.unlink()
+        raise e
 
-    FILENAME: The path to the image file you want to process.
+def internalName(name: str):
+    return name.startswith(".") or name.endswith(".log") or name.endswith(".bak")
+
+def resolvePaths(paths: List[Path]) -> List[Path]:
+    allPaths = set()
+    for p in paths:
+        absP = p.resolve()
+        if internalName(absP.name):
+            continue
+        if absP.is_file():
+                logger.info(f"Resolved file: {absP}")
+                allPaths.add(absP)
+        elif absP.is_dir():
+            itr = absP.iterdir()
+            allPaths.update(resolvePaths(list(itr)))
+        else:
+            info.warn(f"Unknown path type {absP}")
+    return list(allPaths)
+
+def extractDates(paths: List[Path]) -> List[tuple[datetime, Path]]:
+    result = []
+    for p in paths:
+        date = getTimeData(p)
+        if date is None:
+            logger.warn(f"Failed to parse date of {p}. Will skip it!")
+        else:
+            logger.info(f"Parsed date of {p} is {date}")
+            result.append((date, p))
+    return result
+
+def patchFiles(files: List[tuple[datetime, Path]]):
+    for f in files:
+        try:
+            patchDateWithBackup(f[0], f[1])
+        except Exception as e:
+            logger.error(f"Failed to process {f[1]}: {e}")
+
+
+@click.command()
+@click.argument('paths', nargs=-1, type=click.Path(exists=True, path_type=Path))
+def main(paths):
+    """
+    Changes the dates of images based on time metadata in their names
+
+    paths: list of files or directories
     """
     global logger
     logger = setupLogger()
-    inputFile = Path(filename)
-    date = getTimeData(inputFile)
-    if date is None:
-        logger.warn(f"Failed to parse date of {inputFile}. Will skip it!")
-        return None
-    else:
-        logger.info(f"Parsed date of {inputFile} is {date}")
-    copy = copyFile(Path(sys.argv[1]))
-    setModificationDate(copy, date)
-    Path("archive.zip").unlink(missing_ok=True)
-    zipPaths([copy])
-    unzipWithCorrectDate(date, copy)
-    Path("archive.zip").unlink(missing_ok=True)
+
+    allPaths = resolvePaths(paths)
+    pathsWithDates = extractDates(allPaths)
+    patchFiles(pathsWithDates)
+
 
 
 if __name__ == '__main__':
