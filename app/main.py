@@ -39,8 +39,8 @@ def patchDate(date: datetime, path: Path):
         # Equivalent to: sudo date -s "2025-12-27 14:30:00"
         data = path.read_bytes()
         commands = f"""
-        rm -rf {path}
-        sudo date -s '{date.strftime('%Y-%m-%d %H:%M:%S')}' && touch {path}
+        rm -rf '{path}'
+        sudo -v date -s '{date.strftime('%Y-%m-%d %H:%M:%S')}' && touch '{path}'
         """
         subprocess.run(commands, check=True, shell=True)
         path.write_bytes(data)
